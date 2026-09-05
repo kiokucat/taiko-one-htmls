@@ -542,6 +542,16 @@ class SongLoader {
     this.parser = new TJAParser();
   }
 
+  // TJA読込: UTF-8でデコードし、文字化け(�)があればShift-JISで再デコード
+  async readTJA(file) {
+    const buf = await file.arrayBuffer();
+    let text = new TextDecoder('utf-8').decode(buf);
+    if (text.includes('�')) {
+      try { text = new TextDecoder('shift_jis').decode(buf); } catch (e) {}
+    }
+    return text;
+  }
+
   async handleFiles(files) {
     const folderMap = {};
     for (let file of files) {
@@ -576,7 +586,7 @@ class SongLoader {
       const entry = folderMap[songName];
       if (entry.tja && entry.audio) {
         try {
-          const tjaText = await entry.tja.text();
+          const tjaText = await this.readTJA(entry.tja);
           const courses = this.parser.parse(tjaText);
           if (courses.length > 0) {
             loaded.push({
@@ -1276,17 +1286,32 @@ class GameEngine {
     ctx.lineJoin = 'round';
     ctx.lineWidth = 8;
     ctx.strokeStyle = '#000';
-    ctx.strokeText(String(this.score), 22, 192);
+    ctx.strokeText(String(this.score), 22, 182);
     ctx.fillStyle = '#fff';
-    ctx.fillText(String(this.score), 22, 192);
+    ctx.fillText(String(this.score), 22, 182);
 
     const course = this.songs[this.selectedSong] ? this.songs[this.selectedSong].courses[this.selectedDiff] : null;
     const diffNames = course ? (course.headers.COURSE || 'Oni') : 'Oni';
     const diffLabels = { Easy: 'かんたん', Normal: 'ふつう', Hard: 'むずかしい', Oni: 'おに', Edit: 'えでぃっと' };
+    const diffColors = { Easy: '#ffb300', Normal: '#7cb342', Hard: '#546e7a', Oni: '#c2185b', Edit: '#5e35b1' };
+    const badgeKey = diffNames.charAt(0).toUpperCase() + diffNames.slice(1).toLowerCase();
+
+    // 難易度徽章(edit/oni/hard/normal/easy.png)
+    const badge = this.courseBadges && this.courseBadges[badgeKey];
+    if (badge && badge.complete && badge.naturalWidth) {
+      const bw = 52, bh = 52 * badge.naturalHeight / badge.naturalWidth;
+      ctx.drawImage(badge, 66 - bw / 2, 208 - bh / 2, bw, bh);
+    } else {
+      ctx.fillStyle = diffColors[badgeKey] || '#c2185b';
+      ctx.beginPath(); ctx.arc(66, 208, 26, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = '#fff';
+      this.drawStar(ctx, 66, 208, 5, 15, 7);
+    }
 
     // ミニ太鼓入力表示: 枠画像の上に、叩いた側のハイライトを重ねる
     // (F=左ドン / J=右ドン / D=左カツ / K=右カツ)
-    const mx = 66, my = 248;
+    const mx = 66, my = 266;
     const lt = 0.15;
     const lDon = this.lastLeftDonAt !== undefined && (this.animTime - this.lastLeftDonAt) < lt;
     const rDon = this.lastRightDonAt !== undefined && (this.animTime - this.lastRightDonAt) < lt;
@@ -1299,7 +1324,7 @@ class GameEngine {
     ctx.translate(mx, my);
     if (anyHit) ctx.scale(1.1, 1.1);
     if (tkOk) {
-      const fw = 74, fh = 74 * tk.frame.naturalHeight / tk.frame.naturalWidth;
+      const fw = 60, fh = 60 * tk.frame.naturalHeight / tk.frame.naturalWidth;
       ctx.drawImage(tk.frame, -fw / 2, -fh / 2, fw, fh);
       const ov = (img) => img && img.complete && img.naturalWidth;
       if (lDon && ov(tk.left_don)) ctx.drawImage(tk.left_don, -fw / 2, -fh / 2, fw, fh);
@@ -1329,23 +1354,23 @@ class GameEngine {
       ctx.beginPath(); ctx.moveTo(0, -mr); ctx.lineTo(0, mr); ctx.stroke();
     }
     ctx.restore();
-    // キー表記
-    ctx.font = 'bold 13px sans-serif';
+    // キー表記(左右に分けて表示)
+    ctx.font = 'bold 12px sans-serif';
     ctx.textAlign = 'center';
     ctx.lineWidth = 4;
     ctx.strokeStyle = '#000';
-    ctx.strokeText('F/J', mx - 20, my - 46);
-    ctx.strokeText('D/K', mx + 20, my - 46);
+    ctx.strokeText('F/J', mx - 48, my + 4);
+    ctx.strokeText('D/K', mx + 48, my + 4);
     ctx.fillStyle = '#fff';
-    ctx.fillText('F/J', mx - 20, my - 46);
-    ctx.fillText('D/K', mx + 20, my - 46);
+    ctx.fillText('F/J', mx - 48, my + 4);
+    ctx.fillText('D/K', mx + 48, my + 4);
     // 難易度ラベル
     ctx.font = 'bold 15px sans-serif';
     ctx.lineWidth = 5;
-    ctx.strokeText(diffLabels[diffNames] || diffNames, 66, 308);
-    ctx.fillText(diffLabels[diffNames] || diffNames, 66, 308);
+    ctx.strokeText(diffLabels[diffNames] || diffNames, 66, 310);
+    ctx.fillText(diffLabels[diffNames] || diffNames, 66, 310);
 
-    this.drawCharImg(ctx, 192, 240, 190, 98, this.gogoActive ? 'gogo' : 'char', this.charHitT);
+    this.drawCharImg(ctx, 226, 244, 136, 70, this.gogoActive ? 'gogo' : 'char', this.charHitT);
 
     ctx.fillStyle = '#161619';
     ctx.fillRect(PANEL_W, LANE_Y, W - PANEL_W, LANE_H);
@@ -1500,7 +1525,7 @@ class GameEngine {
       } else if (eff.type === 'good') {
         ctx.fillStyle = `rgba(0, 255, 127, ${alpha})`;
         ctx.font = `bold ${30 + age * 55}px sans-serif`;
-        ctx.fillText('GOOD', eff.x, eff.y - 55 - age * 35);
+        ctx.fillText('可', eff.x, eff.y - 55 - age * 35);
       } else if (eff.type === 'miss') {
         ctx.fillStyle = `rgba(160, 160, 160, ${alpha})`;
         ctx.font = `bold ${30 + age * 45}px sans-serif`;
@@ -2028,7 +2053,8 @@ class GameEngine {
       ctx.fillStyle = '#4e2c1e';
       ctx.font = 'bold 24px sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText(this.songs[i].name, 120, y + 42);
+      const dispName = (this.songs[i].courses[0] && (this.songs[i].courses[0].headers.TITLEJA || this.songs[i].courses[0].headers.TITLE)) || this.songs[i].name;
+      ctx.fillText(dispName, 120, y + 42);
       const courses = this.songs[i].courses;
       ctx.textAlign = 'center';
       for (let j = 0; j < courses.length; j++) {
