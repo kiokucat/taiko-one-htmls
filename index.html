@@ -1153,13 +1153,13 @@ class GameEngine {
           note.hp1 = true;
           this.combo = 0;
           this.miss++;
-          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'miss', time: musicTime, life: 0.5 });
+          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'miss', time: musicTime, life: 1.3 });
         }
         if (this.players === 2 && !note.hp2) {
           note.hp2 = true;
           this.p2.combo = 0;
           this.p2.miss++;
-          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(2), type: 'miss', time: musicTime, life: 0.5 });
+          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(2), type: 'miss', time: musicTime, life: 1.3 });
         }
       }
     }
@@ -1170,10 +1170,10 @@ class GameEngine {
         if (roll.hits === 0) {
           this.combo = 0;
           this.miss++;
-          this.hitEffects.push({ x: this.judgeLineX, y: LANE_CY, type: 'miss', time: musicTime, life: 0.5 });
+          this.hitEffects.push({ x: this.judgeLineX, y: LANE_CY, type: 'miss', time: musicTime, life: 1.3 });
         } else {
           this.perfect++;
-          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'perfect', time: musicTime, life: 0.6 });
+          this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'perfect', time: musicTime, life: 1.3 });
         }
       }
     }
@@ -1185,7 +1185,7 @@ class GameEngine {
           if (balloon.hits >= balloon.hitsRequired) balloon.poppedAt = musicTime;
           if (balloon.hits >= balloon.hitsRequired) {
             this.perfect++;
-            this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'perfect', time: musicTime, life: 0.6 });
+            this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(1), type: 'perfect', time: musicTime, life: 1.3 });
           }
           this.audio.playSE('balloon');
           // 回数不足でも不可・コンボリセットにはしない(静かに消える)
@@ -1305,9 +1305,9 @@ class GameEngine {
       if (musicTime >= note.time - 0.02) {
         this.autoProcessed.add(key);
         this._autoAlt = !this._autoAlt;
-        this._autoNoType = true; // オートは交互打ち・タイプ不問
-        this.input(this._autoAlt, this._autoAlt ? 'right' : 'left', 1);
-        this._autoNoType = false;
+        // 交互打ち: 左右手を交互に。音符のドン/カツは正しい色で区別して叩く
+        const et = note.rt1 || note.type;
+        this.input(et === 1 || et === 3, this._autoAlt ? 'right' : 'left', 1);
       }
     }
     // 連打: 秒速15・交互打ち
@@ -1722,8 +1722,8 @@ class GameEngine {
       this.drawStar(ctx, 66, 208, 5, 15, 7);
     }
 
-    // ミニ太鼓(入力表示): 叩いた側のハイライトを重ねる
-    const mx = 66, my = 266;
+    // ミニ太鼓(入力表示): 大型・パネル右側
+    const mx = 185, my = 252;
     const lt = 0.15;
     const lDon = this.lastLeftDonAt !== undefined && (this.animTime - this.lastLeftDonAt) < lt;
     const rDon = this.lastRightDonAt !== undefined && (this.animTime - this.lastRightDonAt) < lt;
@@ -1741,7 +1741,7 @@ class GameEngine {
     ctx.translate(mx, my);
     if (anyHit) ctx.scale(1.1, 1.1);
     if (tkOk) {
-      const fw = 60, fh = 60 * tk.frame.naturalHeight / tk.frame.naturalWidth;
+      const fw = 92, fh = 92 * tk.frame.naturalHeight / tk.frame.naturalWidth;
       ctx.drawImage(tk.frame, -fw / 2, -fh / 2, fw, fh);
       const ov = (img) => img && img.complete && img.naturalWidth;
       // P2用の赤青反転キャッシュ
@@ -1770,7 +1770,7 @@ class GameEngine {
       if (rKa2 && ov(tk.right_ka)) ctx.drawImage(tint(tk.right_ka, '#e53935'), -fw / 2, -fh / 2, fw, fh);
     } else {
       const donFlash = lDon || rDon, kaFlash = lKa || rKa;
-      const mr = 30;
+      const mr = 42;
       ctx.fillStyle = '#fff';
       ctx.beginPath(); ctx.arc(0, 0, mr + 4, 0, Math.PI * 2); ctx.fill();
       ctx.save();
@@ -1795,11 +1795,11 @@ class GameEngine {
     ctx.textAlign = 'center';
     ctx.lineWidth = 4;
     ctx.strokeStyle = '#000';
-    ctx.strokeText('F/J', mx - 48, my + 4);
-    ctx.strokeText('D/K', mx + 48, my + 4);
+    ctx.strokeText('F/J', mx - 64, my + 4);
+    ctx.strokeText('D/K', mx + 64, my + 4);
     ctx.fillStyle = '#fff';
-    ctx.fillText('F/J', mx - 48, my + 4);
-    ctx.fillText('D/K', mx + 48, my + 4);
+    ctx.fillText('F/J', mx - 64, my + 4);
+    ctx.fillText('D/K', mx + 64, my + 4);
 
     // 難易度ラベル
     ctx.font = 'bold 15px sans-serif';
@@ -1810,40 +1810,67 @@ class GameEngine {
 
 
 
+    // 判定テキスト: 上側から幽霊(不透明度0)で登場 → イージング0.5秒で移動 → その後ゆっくりフェード
     for (let eff of this.hitEffects) {
       const age = musicTime - eff.time;
-      const alpha = 1 - (age / eff.life);
+      if (age < 0) continue;
+      const enter = Math.min(1, age / 0.5);
+      const ease = 1 - Math.pow(1 - enter, 3); // ease-out
+      const fadeDur = Math.max(0.3, eff.life - 0.5);
+      const alpha = age <= 0.5 ? ease : Math.max(0, 1 - (age - 0.5) / fadeDur);
+      const rise = (1 - ease) * 20;           // 最終位置から+20px上から降りてくる
+      const sxx = 1 + (1 - ease) * 0.05;      // 横はほぼ変化なし
+      const syy = 1 + (1 - ease) * 0.22;      // 縦比率を控えめに伸ばして現れる
       ctx.textAlign = 'center';
-      if (eff.type === 'perfect') {
-        ctx.fillStyle = `rgba(255, 215, 0, ${alpha})`;
-        ctx.font = `bold ${34 + age * 70}px sans-serif`;
-        ctx.fillText('良', eff.x, eff.y - 62 - age * 40);
-      } else if (eff.type === 'good') {
-        ctx.fillStyle = `rgba(0, 255, 127, ${alpha})`;
-        ctx.font = `bold ${30 + age * 55}px sans-serif`;
-        ctx.fillText('可', eff.x, eff.y - 55 - age * 35);
-      } else if (eff.type === 'miss') {
-        ctx.fillStyle = `rgba(160, 160, 160, ${alpha})`;
-        ctx.font = `bold ${30 + age * 45}px sans-serif`;
-        ctx.fillText('不可', eff.x, eff.y - 55 - age * 35);
+      ctx.globalAlpha = alpha;
+      const sets = {
+        perfect: ['良', 40, '#ffd700', 'rgba(120, 60, 0, 0.85)'],
+        good:    ['可', 34, '#00e676', 'rgba(0, 90, 40, 0.85)'],
+        miss:    ['不可', 34, '#c9c9c9', 'rgba(60, 60, 60, 0.85)'],
+      };
+      const s = sets[eff.type];
+      if (s) {
+        ctx.save();
+        ctx.translate(eff.x, eff.y - 62 - rise);
+        ctx.scale(sxx, syy);
+        ctx.font = `bold ${s[1]}px "Zen Antique Soft", "Arial Black", sans-serif`;
+        ctx.lineWidth = 8;
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = s[3];
+        ctx.strokeText(s[0], 0, 0);
+        ctx.fillStyle = s[2];
+        ctx.fillText(s[0], 0, 0);
+        ctx.restore();
       }
+      ctx.globalAlpha = 1;
     }
 
     // コンボ表示(ミニ太鼓マークの中央に中央ぞろえ / 5コンボから / 50で銀・100で金)
+    if (this.combo !== this._lastComboDrawn) {
+      this._comboBounceAt = this.animTime; // 増減の瞬間にバウンド開始
+      this._lastComboDrawn = this.combo;
+    }
     if (this.combo >= 5) {
+      const bt = this._comboBounceAt ? Math.min(1, (this.animTime - this._comboBounceAt) / 0.35) : 1;
+      const comboSy = 1 + Math.sin(bt * Math.PI) * 0.35; // 跳ねる代わりに縦比率が伸び縮み
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.scale(1, comboSy);
+      ctx.translate(-mx, -my);
       const comboColor = this.combo >= 100 ? '#ffca28' : this.combo >= 50 ? '#d5dbe0' : '#ffffff';
       ctx.textAlign = 'center';
       ctx.font = 'bold 30px "Zen Antique Soft", "Arial Black", sans-serif';
       ctx.lineJoin = 'round';
       ctx.lineWidth = 6;
       ctx.strokeStyle = '#26130b';
-      ctx.strokeText(String(this.combo), 66, 266);
+      ctx.strokeText(String(this.combo), mx, my);
       ctx.fillStyle = comboColor;
-      ctx.fillText(String(this.combo), 66, 266);
+      ctx.fillText(String(this.combo), mx, my);
       ctx.font = 'bold 10px sans-serif';
       ctx.lineWidth = 3;
-      ctx.strokeText('combo', 66, 279);
-      ctx.fillText('combo', 66, 279);
+      ctx.strokeText('combo', mx, my + 13);
+      ctx.fillText('combo', mx, my + 13);
+      ctx.restore();
     }
 
     // カウントイン表示(音楽開始前の待機中)
@@ -2413,14 +2440,7 @@ class GameEngine {
   // タイトル画面の設定ボタン定義
   getSettingsButtons() {
     const labels = [
-      { label: '戻る', action: 'back' },
-      { label: '📁 フォルダ読込', action: 'folder' },
-      { label: '🔄 再読込', action: 'reload' },
-      { label: '🤖 AUTO:' + (this.autoPlay ? 'ON' : 'OFF'), action: 'auto' },
-      { label: '🎨 体色', action: 'color' },
-      { label: '🌈 虹:' + (this.rainbowStyle === 0 ? 'A' : 'B'), action: 'rainbow' },
-      { label: '⌨ キー', action: 'keys' },
-      { label: '🎵 ' + this.soundset, action: 'soundset' },
+      { label: '⌨ キー設定', action: 'keys' },
     ];
     const w = 140, h = 40, gap = 10;
     const total = labels.length * w + (labels.length - 1) * gap;
@@ -2513,10 +2533,14 @@ class GameEngine {
       const dispName = (this.songs[i].courses[0] && (this.songs[i].courses[0].headers.TITLEJA || this.songs[i].courses[0].headers.TITLE)) || this.songs[i].name;
       ctx.fillText(dispName, 120, y + 42);
       const courses = this.songs[i].courses;
-      // 難易度徽章(右寄せ・画像+レベル数値・はみ出し防止)
+      // 難易度徽章(右寄せ・画像+レベル数値・末尾の数値まで含めて画面内にクランプ)
       const dnList = courses.map(c => c.headers.COURSE || 'Oni');
       const itemW = 76;
-      let bx = W - 100 - (dnList.length - 1) * itemW;
+      const lvLast = String(courses[courses.length - 1].headers.LEVEL || '?');
+      // 曲行の右端(W-90)の内側に、最後の数値まで含めて収める
+      const bxLast = (W - 90) - 16 - 20 - lvLast.length * 10;
+      let bx = bxLast - (dnList.length - 1) * itemW;
+      if (bx < 380) bx = 380; // 曲名との最低限の余白
       for (let j = 0; j < dnList.length; j++) {
         const dn = dnList[j];
         const key = dn.charAt(0).toUpperCase() + dn.slice(1).toLowerCase();
@@ -2628,6 +2652,7 @@ class GameEngine {
         p,
         y: p === 0 ? 424 : 474,
         buttons: [
+          { label: '🤖 AUTO:' + (this.autoPlay ? 'ON' : 'OFF'), act: 'auto', x: 56, w: 136 },
           { label: 'HS −', act: 'hsDown', x: 200, w: 56 },
           { label: 'HS ' + this.hs.toFixed(1), act: null, x: 262, w: 78, fill: '#ffe082' },
           { label: 'HS ＋', act: 'hsUp', x: 346, w: 56 },
@@ -2763,14 +2788,14 @@ class GameEngine {
         if (st.combo % 10 === 0) this.comboFlashAt = this.animTime;
         if (COMBO_VOICE_THRESHOLDS.includes(st.combo)) this.audio.playComboVoice(st.combo);
         st.score = Math.min(999999, st.score + Math.round(this.pointPerfect + st.combo * this.comboK));
-        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'perfect', time: musicTime, life: 0.6 });
+        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'perfect', time: musicTime, life: 1.3 });
       } else {
         st.good++;
         st.combo++;
         if (st.combo % 10 === 0) this.comboFlashAt = this.animTime;
         if (COMBO_VOICE_THRESHOLDS.includes(st.combo)) this.audio.playComboVoice(st.combo);
         st.score = Math.min(999999, st.score + Math.round(this.pointGood + st.combo * this.comboK * 0.5));
-        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'good', time: musicTime, life: 0.5 });
+        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'good', time: musicTime, life: 1.3 });
       }
       if (st.combo > st.maxCombo) st.maxCombo = st.combo;
       this.audio.playSE(isDon ? 'don' : 'ka');
@@ -2812,7 +2837,7 @@ class GameEngine {
         balloon.popped = true;
         balloon.poppedAt = musicTime;
         this.perfect++;
-        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'perfect', time: musicTime, life: 0.6 });
+        this.hitEffects.push({ x: this.judgeLineX, y: this.laneCY(player), type: 'perfect', time: musicTime, life: 1.3 });
         this.audio.playSE('balloon');
       }
       return;
@@ -2891,7 +2916,8 @@ class GameEngine {
         for (const b of row.buttons) {
           if (!b.act || x < b.x || x > b.x + b.w) continue;
           const p = row.p;
-          if (b.act === 'hsDown') this.hs = Math.max(0.5, Math.round((this.hs - 0.5) * 10) / 10);
+          if (b.act === 'auto') this.autoPlay = !this.autoPlay;
+          else if (b.act === 'hsDown') this.hs = Math.max(0.5, Math.round((this.hs - 0.5) * 10) / 10);
           else if (b.act === 'hsUp') this.hs = Math.min(4.0, Math.round((this.hs + 0.5) * 10) / 10);
           else if (b.act === 'rand') this.randMode[p] = this.randMode[p] === 'off' ? 'kimagure' : this.randMode[p] === 'kimagure' ? 'detarame' : 'off';
           else if (b.act === 'abe') this.abe[p] = !this.abe[p];
