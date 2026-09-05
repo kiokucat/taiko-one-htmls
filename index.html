@@ -678,16 +678,20 @@ class GameEngine {
 
   resize() {
     const container = this.canvas.parentElement;
-    const aspect = W / H;
-    let w = container.clientWidth * 0.96;
-    let h = w / aspect;
-    if (h > container.clientHeight * 0.84) {
-      h = container.clientHeight * 0.84;
-      w = h * aspect;
+    const dpr = window.devicePixelRatio || 1;
+    const availW = container.clientWidth * 0.96;
+    const availH = container.clientHeight * 0.84;
+    let cssW = availW;
+    let cssH = cssW / (W / H);
+    if (cssH > availH) {
+      cssH = availH;
+      cssW = cssH * (W / H);
     }
-    this.canvas.style.width = w + 'px';
-    this.canvas.style.height = h + 'px';
-    this.scale = w / W;
+    this.canvas.style.width = Math.round(cssW) + 'px';
+    this.canvas.style.height = Math.round(cssH) + 'px';
+    this.canvas.width = Math.max(1, Math.round(cssW * dpr));
+    this.canvas.height = Math.max(1, Math.round(cssH * dpr));
+    this.scale = this.canvas.width / W;
   }
 
   async loadAssets(onProgress) {
@@ -997,6 +1001,7 @@ class GameEngine {
   // 演奏クロック: カウントイン中は-LEAD_INから進行(音符が先行して流れる)。
   // 音楽開始直前で0になり、開始後はaudio.getTime()と連続する
   gameClock() {
+    if (this._endTriggered && this.frozenClock !== undefined) return this.frozenClock;
     if (this.isPlaying && !this.audio.isPlaying && this.gameStartAt) {
       return (performance.now() - this.gameStartAt) / 1000 - LEAD_IN;
     }
@@ -1024,20 +1029,20 @@ class GameEngine {
     this.lastFrame = now;
     this.animTime = now / 1000;
     this.titleAnim += dt;
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
     if (this.charHitT > 0) this.charHitT = Math.max(0, this.charHitT - dt);
 
     if (this.screen === 'playing') {
       const musicTime = this.gameClock();
       this.update(musicTime);
       this.drawGame(musicTime);
+      if (this._endTriggered) this.drawClear(); // 演奏画面の上にクリア演出
     } else if (this.screen === 'title') {
       this.drawTitle();
     } else if (this.screen === 'songSelect') {
       this.drawSongSelect();
     } else if (this.screen === 'difficulty') {
       this.drawDifficulty();
-    } else if (this.screen === 'clear') {
-      this.drawClear();
     } else if (this.screen === 'result') {
       this.drawResult();
     }
@@ -1147,6 +1152,7 @@ class GameEngine {
     else kind = 'fail';
     this.clearKind = kind;
     this.clearShownAt = this.animTime;
+    this.frozenClock = this.gameClock();
     this.isPlaying = false;
     this.audio.stop();
     // 結果音声(norma/fullcombo/dondafull/failed.ogg)
@@ -1158,14 +1164,11 @@ class GameEngine {
       src.connect(this.audio.masterGain);
       src.start();
     }
-    this.screen = 'clear';
   }
 
   // クリア演出描画(なめらかなスケールアニメーション)
   drawClear() {
     const ctx = this.ctx;
-    ctx.fillStyle = '#160404';
-    ctx.fillRect(0, 0, W, H);
     const t = this.animTime - this.clearShownAt;
     const ease = Math.min(1, t / 0.4);
     const scale = 0.6 + 0.4 * (1 - Math.pow(1 - ease, 3)); // ease-out
@@ -1491,6 +1494,20 @@ class GameEngine {
     ctx.fillRect(PANEL_W, LANE_Y - 4, W - PANEL_W, 4);
     ctx.fillRect(PANEL_W, LANE_Y + LANE_H, W - PANEL_W, 4);
 
+    // 魂の炎(GOGO中のみ・2.5倍・フレーム1〜6) ※ノーツ・判定枠の下に半透明で
+    if (this.gogoActive) {
+      const soulArr = this.assets.soul;
+      if (soulArr && soulArr.length) {
+        const sImg = soulArr[1 + Math.floor(this.animTime * 10) % 6];
+        if (sImg && sImg.complete && sImg.naturalWidth) {
+          ctx.save();
+          ctx.globalAlpha = 0.5;
+          ctx.drawImage(sImg, this.judgeLineX - 137, LANE_CY - 137, 275, 275);
+          ctx.restore();
+        }
+      }
+    }
+
     for (let ml of this.measureLines) {
       const mx = this.judgeLineX + (ml.time - musicTime) * this.noteSpeed * this.hs * ml.scroll;
       if (mx < PANEL_W || mx > W) continue;
@@ -1597,17 +1614,6 @@ class GameEngine {
       ctx.textAlign = 'center';
       const remain = balloon.hit ? Math.max(0, balloon.hitsRequired - balloon.hits) : balloon.hitsRequired;
       ctx.fillText(String(remain), bpx, bpy + 6);
-    }
-
-    // 魂の炎(GOGO中のみ・2.5倍・フレーム1〜6)
-    if (this.gogoActive) {
-      const soulArr = this.assets.soul;
-      if (soulArr && soulArr.length) {
-        const sImg = soulArr[1 + Math.floor(this.animTime * 10) % 6];
-        if (sImg && sImg.complete && sImg.naturalWidth) {
-          ctx.drawImage(sImg, this.judgeLineX - 137, LANE_CY - 137, 275, 275);
-        }
-      }
     }
 
     ctx.strokeStyle = '#ffd700';
@@ -1745,6 +1751,15 @@ class GameEngine {
     this.drawLanternString(ctx, 356, 0, t);
     this.drawLanternString(ctx, 396, 55, t);
 
+    this.drawCandyStall(ctx, 36, 408);
+    this.drawTakoyakiStall(ctx, 470, 380, t);
+    this.drawKakigoriStall(ctx, 972, 402);
+
+    if (gogo) {
+      ctx.fillStyle = 'rgba(255, 120, 0, 0.07)';
+      ctx.fillRect(0, SCENE_Y, W, H - SCENE_Y);
+    }
+
     // GOGO開始時のみ: 下側に花火を3本表示(firePhaseはGOGO開始からの経過秒)
     if (firePhase !== null) {
       ctx.save();
@@ -1761,15 +1776,6 @@ class GameEngine {
       }
       ctx.restore();
       ctx.globalAlpha = 1;
-    }
-
-    this.drawCandyStall(ctx, 36, 408);
-    this.drawTakoyakiStall(ctx, 470, 380, t);
-    this.drawKakigoriStall(ctx, 972, 402);
-
-    if (gogo) {
-      ctx.fillStyle = 'rgba(255, 120, 0, 0.07)';
-      ctx.fillRect(0, SCENE_Y, W, H - SCENE_Y);
     }
 
     ctx.fillStyle = '#7f0000';
@@ -2442,8 +2448,6 @@ class GameEngine {
           return;
         }
       }
-    } else if (this.screen === 'clear') {
-      this.screen = 'result';
     } else if (this.screen === 'result') {
       this.screen = 'title';
     }
@@ -2599,7 +2603,7 @@ async function traverseEntry(entry, files, path = '') {
 document.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.target && e.target.id === 'searchBox') return; // 検索入力中はゲームキー無効
-  if (game.screen === 'clear' && (e.key === 'Enter' || e.key === 'Escape')) {
+  if (game.screen === 'playing' && game._endTriggered && (e.key === 'Enter' || e.key === 'Escape')) {
     game.screen = 'result';
     return;
   }
