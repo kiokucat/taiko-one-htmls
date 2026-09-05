@@ -72,6 +72,10 @@
     <div class="combo">Combo: <span id="comboVal">0</span></div>
     <div>Perfect: <span id="perfectVal">0</span> | Good: <span id="goodVal">0</span> | Miss: <span id="missVal">0</span></div>
   </div>
+  <input id="searchBox" type="text" placeholder="🔍 曲名・ジャンルで検索" autocomplete="off"
+         style="position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:20;display:none;
+                padding:8px 16px;border-radius:20px;border:2px solid #ffca28;background:#fff8e1;
+                font-size:15px;font-weight:bold;color:#4e2c1e;width:340px;outline:none;">
   <canvas id="gameCanvas" width="1280" height="640"></canvas>
   <div id="dropZone">ここに 曲フォルダの親フォルダ をドロップ<br><small>親フォルダ/曲名/任意名.tja + 任意名.ogg/mp3/wav</small></div>
   <div id="loading">🥁 アセット読み込み中...<div id="loadBar" style="width:300px;height:10px;background:#333;border-radius:5px;"><div id="loadFill" style="width:0%;height:100%;background:linear-gradient(90deg,#ffca28,#ff6f00);border-radius:5px;"></div></div></div>
@@ -274,10 +278,16 @@ class TJAParser {
           inStart = false;
         } else if (line.startsWith('#')) {
           const parts = line.split(/\s+/);
-          const cmd = parts[0];
+          let cmd = parts[0];
           const arg = parts.slice(1).join(' ');
 
-          if (cmd === '#BRANCHSTART' || cmd === '#N' || cmd === '#E' || cmd === '#M' || cmd === '#LEVELHOLD' || cmd === '#BMSCROLL' || cmd === '#HBSCROLL') {
+          // コマンド名の正規化: 大文字化 + '#SCROLL2'のような数字密着形式に対応
+          cmd = cmd.toUpperCase();
+          let inlineVal = null;
+          const mCmd = cmd.match(/^(#SCROLL|#BMSCROLL|#HBSCROLL|#BPMCHANGE)([-\d.]+)$/);
+          if (mCmd) { cmd = mCmd[1]; inlineVal = mCmd[2]; }
+          const val = inlineVal !== null ? inlineVal : arg;
+          if (cmd === '#BRANCHSTART' || cmd === '#N' || cmd === '#E' || cmd === '#M' || cmd === '#LEVELHOLD') {
             continue;
           }
           if (cmd === '#BARLINEOFF') currentMeasure.barline = false;
@@ -291,15 +301,16 @@ class TJAParser {
               currentMeasure.measure = m;
             }
           }
-          if (cmd === '#SCROLL') {
-            currentCourse.currentScroll = parseFloat(arg) || 1;
+          // #BMSCROLL / #HBSCROLL も簡易的にスクロール速度として扱う
+          if (cmd === '#SCROLL' || cmd === '#BMSCROLL' || cmd === '#HBSCROLL') {
+            currentCourse.currentScroll = parseFloat(val) || 1;
             currentMeasure.scroll = currentCourse.currentScroll;
           }
           if (cmd === '#BPMCHANGE') {
             if (currentMeasure.notes) {
               currentCourse.measures.push({...currentMeasure});
             }
-            const newBpm = parseFloat(arg);
+            const newBpm = parseFloat(val);
             currentCourse.currentBPM = newBpm;
             currentMeasure = resetMeasure(newBpm);
           }
@@ -437,6 +448,14 @@ class AudioManager {
     this.seBuffers = {
       don: seMap && seMap.don ? await loadOne(seMap.don) : await tryLoad('don'),
       ka:  seMap && seMap.ka  ? await loadOne(seMap.ka)  : await tryLoad('ka'),
+    };
+    // 結果音声: ノルマ/フルコンボ/ドンダフル/失敗
+    const rMap = (manifest && manifest.result) || {};
+    this.resultVoices = {
+      clear: rMap.clear ? await loadOne(rMap.clear) : await tryLoad('norma'),
+      fc:    rMap.fc    ? await loadOne(rMap.fc)    : await tryLoad('fullcombo'),
+      dfc:   rMap.dfc   ? await loadOne(rMap.dfc)   : await tryLoad('dondafull'),
+      fail:  rMap.fail  ? await loadOne(rMap.fail)  : await tryLoad('failed'),
     };
     // コンボボイス: 10,30,50,100,200,...1000
     this.comboVoices = {};
@@ -633,6 +652,7 @@ class GameEngine {
     this.isPlaying = false;
     this.judgeLineX = 420;
     this.noteSpeed = 380;
+    this.hs = 1.0; // ハイスピード倍率(キーで変更)
     this.hitEffects = [];
     this.screen = 'title';
     this.songs = [];
@@ -845,6 +865,7 @@ class GameEngine {
         for (let i = 0; i < noteCount; i++) {
           const type = parseInt(notesStr[i]);
           const noteTime = time + measureTime * (i / noteCount);
+          if (isNaN(noteTime)) continue; // 異常な譜面データはスキップ
           rawNotes.push({ type, time: noteTime, scroll: currentScroll });
         }
       }
@@ -909,11 +930,14 @@ class GameEngine {
     for (let i = 0; i < rawNotes.length; i++) {
       if (used[i]) continue;
       const n = rawNotes[i];
-      if (n.type === 0 || n.type === 8) continue;
+      if (n.type === 0 || n.type === 8 || n.type === 9) continue; // 9(特殊)は無視
       this.notes.push({ type: n.type, time: n.time, scroll: n.scroll, hit: false });
     }
 
     this.totalNotes = this.notes.length + this.rolls.length + this.balloons.length;
+    // 終了時刻(空配列でも安全)
+    const endTimes = [...this.notes.map(n => n.time), ...this.rolls.map(r => r.endTime), ...this.balloons.map(b => b.endTime)];
+    this.songEndTime = endTimes.length ? Math.max(...endTimes) : 0;
 
     // スコア設計: フルコンボ・全良で約100万点(天井999,999)
     const tn = Math.max(1, this.totalNotes);
@@ -947,6 +971,10 @@ class GameEngine {
     this.soul = 0;
     this.hitEffects = [];
     this.autoProcessed.clear();
+    this._endTriggered = false;
+    this._autoAlt = false;
+    this._autoRollLast = undefined;
+    this._autoBalloonLast = undefined;
     this.isPlaying = true;
     this.screen = 'playing';
     this.gameStartAt = performance.now();
@@ -982,6 +1010,14 @@ class GameEngine {
     return false;
   }
 
+  // 現在のGOGO区間の開始時刻(区間内でなければnull)
+  gogoStartAt(t) {
+    for (let r of this.gogoRanges) {
+      if (t >= r[0] && t < r[1]) return r[0];
+    }
+    return null;
+  }
+
   loop() {
     const now = performance.now();
     const dt = Math.min(0.05, (now - this.lastFrame) / 1000);
@@ -1000,8 +1036,15 @@ class GameEngine {
       this.drawSongSelect();
     } else if (this.screen === 'difficulty') {
       this.drawDifficulty();
+    } else if (this.screen === 'clear') {
+      this.drawClear();
     } else if (this.screen === 'result') {
       this.drawResult();
+    }
+    // 検索ボックスは曲選択画面でのみ表示
+    const sb = document.getElementById('searchBox');
+    if (sb && sb.style.display !== (this.screen === 'songSelect' ? 'block' : 'none')) {
+      sb.style.display = this.screen === 'songSelect' ? 'block' : 'none';
     }
     requestAnimationFrame(() => this.loop());
   }
@@ -1012,18 +1055,18 @@ class GameEngine {
 
     for (let note of this.notes) {
       if (!note.hit) {
-        note.x = this.judgeLineX + (note.time - musicTime) * this.noteSpeed * note.scroll;
+        note.x = this.judgeLineX + (note.time - musicTime) * this.noteSpeed * this.hs * note.scroll;
       }
     }
     for (let roll of this.rolls) {
       if (!roll.hit) {
-        roll.startX = this.judgeLineX + (roll.startTime - musicTime) * this.noteSpeed * roll.scroll;
-        roll.endX = this.judgeLineX + (roll.endTime - musicTime) * this.noteSpeed * roll.scroll;
+        roll.startX = this.judgeLineX + (roll.startTime - musicTime) * this.noteSpeed * this.hs * roll.scroll;
+        roll.endX = this.judgeLineX + (roll.endTime - musicTime) * this.noteSpeed * this.hs * roll.scroll;
       }
     }
     for (let balloon of this.balloons) {
       if (!balloon.popped) {
-        const rawX = this.judgeLineX + (balloon.time - musicTime) * this.noteSpeed * balloon.scroll;
+        const rawX = this.judgeLineX + (balloon.time - musicTime) * this.noteSpeed * this.hs * balloon.scroll;
         balloon.x = Math.max(rawX, this.judgeLineX); // 判定枠に到達したらそれ以上左へ行かず止まる
       }
     }
@@ -1066,12 +1109,10 @@ class GameEngine {
             this.hitEffects.push({ x: this.judgeLineX, y: LANE_CY, type: 'miss', time: musicTime, life: 0.5 });
           }
         } else if (!balloon.hit && musicTime > balloon.time + 0.15) {
+          // スルーした場合: 不可判定にもコンボリセットにもしない
           balloon.hit = true;
           balloon.popped = true;
           balloon.missed = true;
-          this.combo = 0;
-          this.miss++;
-          this.hitEffects.push({ x: this.judgeLineX, y: LANE_CY, type: 'miss', time: musicTime, life: 0.5 });
         }
       }
     }
@@ -1085,17 +1126,80 @@ class GameEngine {
     const allNotesDone = this.notes.every(n => n.hit) &&
                          this.rolls.every(r => r.hit) &&
                          this.balloons.every(b => b.popped);
-    if (allNotesDone && this.totalNotes > 0) {
-      const lastTime = Math.max(
-        ...this.notes.map(n => n.time),
-        ...this.rolls.map(r => r.endTime),
-        ...this.balloons.map(b => b.endTime)
-      );
-      if (musicTime > lastTime + 2) {
-        this.screen = 'result';
-        this.stopGame();
+    // 終了検出: 最後のノーツ+2秒後(全処理済み or +8秒で強制)。成績発表前にクリア演出へ
+    if (!this._endTriggered && this.totalNotes > 0 && musicTime > this.songEndTime + 2) {
+      if (allNotesDone || musicTime > this.songEndTime + 8) {
+        this._endTriggered = true;
+        this.showClearScreen();
       }
     }
+  }
+
+  // 演奏終了演出: ノルマ/フルコンボ/ドンダフル/失敗を中央に表示し音声を鳴らす
+  showClearScreen() {
+    const isDFC = this.miss === 0 && this.good === 0 && this.perfect > 0;
+    const isFC = this.miss === 0 && !isDFC && (this.perfect + this.good) > 0;
+    const cleared = this.soul >= 0.8 || isFC;
+    let kind;
+    if (isDFC) kind = 'dfc';
+    else if (isFC) kind = 'fc';
+    else if (cleared) kind = 'clear';
+    else kind = 'fail';
+    this.clearKind = kind;
+    this.clearShownAt = this.animTime;
+    this.isPlaying = false;
+    this.audio.stop();
+    // 結果音声(norma/fullcombo/dondafull/failed.ogg)
+    const v = this.audio.resultVoices || {};
+    const buf = kind === 'dfc' ? v.dfc : kind === 'fc' ? v.fc : kind === 'clear' ? v.clear : v.fail;
+    if (buf && this.audio.ctx) {
+      const src = this.audio.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.audio.masterGain);
+      src.start();
+    }
+    this.screen = 'clear';
+  }
+
+  // クリア演出描画(なめらかなスケールアニメーション)
+  drawClear() {
+    const ctx = this.ctx;
+    ctx.fillStyle = '#160404';
+    ctx.fillRect(0, 0, W, H);
+    const t = this.animTime - this.clearShownAt;
+    const ease = Math.min(1, t / 0.4);
+    const scale = 0.6 + 0.4 * (1 - Math.pow(1 - ease, 3)); // ease-out
+    const alpha = t > 2.2 ? Math.max(0, 1 - (t - 2.2) / 0.4) : 1;
+    const label = { dfc: 'ドンダフルコンボ!!', fc: 'フルコンボ!!', clear: 'クリア成功', fail: 'クリア失敗' }[this.clearKind];
+    ctx.save();
+    ctx.translate(W / 2, H / 2 - 40);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 72px "Hiragino Kaku Gothic ProN", sans-serif';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 14;
+    ctx.strokeStyle = '#fff';
+    ctx.strokeText(label, 0, 0);
+    let fill;
+    if (this.clearKind === 'dfc') {
+      // ニジイロ: 虹色グラデーション(色相が流れる)
+      const hue = (this.animTime * 60) % 360;
+      fill = ctx.createLinearGradient(-330, 0, 330, 0);
+      for (let i = 0; i <= 6; i++) fill.addColorStop(i / 6, `hsl(${(hue + i * 60) % 360}, 92%, 55%)`);
+    } else if (this.clearKind === 'fc') {
+      fill = ctx.createLinearGradient(0, -50, 0, 20);
+      fill.addColorStop(0, '#ffd700');
+      fill.addColorStop(1, '#ff8f00');
+    } else if (this.clearKind === 'clear') {
+      fill = '#e53935'; // 赤
+    } else {
+      fill = '#2196f3'; // 青
+    }
+    ctx.fillStyle = fill;
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+    if (t > 2.6) this.screen = 'result'; // 成績発表へ
   }
 
   _processAuto(musicTime) {
@@ -1108,22 +1212,26 @@ class GameEngine {
         this.input((note.type === 1 || note.type === 3));
       }
     }
+    // 連打: 秒速15・交互打ち
     for (let roll of this.rolls) {
       if (roll.hit) continue;
-      const key = 'r' + roll.startTime;
-      if (this.autoProcessed.has(key)) continue;
       if (musicTime >= roll.startTime - 0.02 && musicTime <= roll.endTime) {
-        this.autoProcessed.add(key);
-        this.input(true);
+        if (this._autoRollLast === undefined || musicTime - this._autoRollLast >= 1 / 15) {
+          this._autoRollLast = musicTime;
+          this._autoAlt = !this._autoAlt;
+          this.input(this._autoAlt);
+        }
       }
     }
+    // 風船: 秒速30・交互打ち
     for (let balloon of this.balloons) {
       if (balloon.popped) continue;
-      const key = 'b' + balloon.time;
-      if (this.autoProcessed.has(key)) continue;
       if (musicTime >= balloon.time - 0.02 && musicTime <= balloon.endTime) {
-        this.autoProcessed.add(key);
-        this.input(true);
+        if (this._autoBalloonLast === undefined || musicTime - this._autoBalloonLast >= 1 / 30) {
+          this._autoBalloonLast = musicTime;
+          this._autoAlt = !this._autoAlt;
+          this.input(this._autoAlt);
+        }
       }
     }
   }
@@ -1134,7 +1242,9 @@ class GameEngine {
     ctx.clearRect(0, 0, W, H);
     this.drawHeader(ctx);
     this.drawLane(ctx, musicTime);
-    this.drawFestival(ctx, this.animTime, this.gogoActive);
+    // 花火はGOGO開始から2秒間のみ
+    const gs = this.gogoStartAt(musicTime);
+    this.drawFestival(ctx, this.animTime, this.gogoActive, (gs !== null && musicTime - gs < 2.0) ? (musicTime - gs) : null);
     this.drawBpmOverlay(ctx);
   }
 
@@ -1178,14 +1288,13 @@ class GameEngine {
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.fillRect(0, HEADER_H - 9, W, 2);
 
-    // ---- アバター(左上・キャラ全体表示) ----
+    // ---- キャラクター(左上) ----
     const avX = 96, avY = 64;
     ctx.fillStyle = '#ff5722';
     ctx.beginPath(); ctx.arc(avX, avY, 50, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#3e0d04'; ctx.lineWidth = 4; ctx.stroke();
     const img = this.charFrame(this.gogoActive ? 'gogo' : 'char');
     if (img && img.width) {
-      // アスペクト比を保ってヘッダー内に収める
       const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
       const sc = Math.min(190 / iw, 96 / ih);
       ctx.drawImage(img, avX + 6 - iw * sc / 2, avY + 4 - ih * sc / 2, iw * sc, ih * sc);
@@ -1309,8 +1418,7 @@ class GameEngine {
       this.drawStar(ctx, 66, 208, 5, 15, 7);
     }
 
-    // ミニ太鼓入力表示: 枠画像の上に、叩いた側のハイライトを重ねる
-    // (F=左ドン / J=右ドン / D=左カツ / K=右カツ)
+    // ミニ太鼓(入力表示): 叩いた側のハイライトを重ねる
     const mx = 66, my = 266;
     const lt = 0.15;
     const lDon = this.lastLeftDonAt !== undefined && (this.animTime - this.lastLeftDonAt) < lt;
@@ -1332,9 +1440,8 @@ class GameEngine {
       if (lKa && ov(tk.left_ka)) ctx.drawImage(tk.left_ka, -fw / 2, -fh / 2, fw, fh);
       if (rKa && ov(tk.right_ka)) ctx.drawImage(tk.right_ka, -fw / 2, -fh / 2, fw, fh);
     } else {
-      // 素材が無い場合のフォールバック(赤/青の半分太鼓)
       const donFlash = lDon || rDon, kaFlash = lKa || rKa;
-      const mr = 34;
+      const mr = 30;
       ctx.fillStyle = '#fff';
       ctx.beginPath(); ctx.arc(0, 0, mr + 4, 0, Math.PI * 2); ctx.fill();
       ctx.save();
@@ -1354,7 +1461,7 @@ class GameEngine {
       ctx.beginPath(); ctx.moveTo(0, -mr); ctx.lineTo(0, mr); ctx.stroke();
     }
     ctx.restore();
-    // キー表記(左右に分けて表示)
+    // キー表記(左右)
     ctx.font = 'bold 12px sans-serif';
     ctx.textAlign = 'center';
     ctx.lineWidth = 4;
@@ -1364,13 +1471,13 @@ class GameEngine {
     ctx.fillStyle = '#fff';
     ctx.fillText('F/J', mx - 48, my + 4);
     ctx.fillText('D/K', mx + 48, my + 4);
+
     // 難易度ラベル
     ctx.font = 'bold 15px sans-serif';
     ctx.lineWidth = 5;
     ctx.strokeText(diffLabels[diffNames] || diffNames, 66, 310);
     ctx.fillText(diffLabels[diffNames] || diffNames, 66, 310);
 
-    this.drawCharImg(ctx, 226, 244, 136, 70, this.gogoActive ? 'gogo' : 'char', this.charHitT);
 
     ctx.fillStyle = '#161619';
     ctx.fillRect(PANEL_W, LANE_Y, W - PANEL_W, LANE_H);
@@ -1385,7 +1492,7 @@ class GameEngine {
     ctx.fillRect(PANEL_W, LANE_Y + LANE_H, W - PANEL_W, 4);
 
     for (let ml of this.measureLines) {
-      const mx = this.judgeLineX + (ml.time - musicTime) * this.noteSpeed * ml.scroll;
+      const mx = this.judgeLineX + (ml.time - musicTime) * this.noteSpeed * this.hs * ml.scroll;
       if (mx < PANEL_W || mx > W) continue;
       ctx.strokeStyle = 'rgba(255,255,255,0.20)';
       ctx.lineWidth = 2;
@@ -1492,12 +1599,14 @@ class GameEngine {
       ctx.fillText(String(remain), bpx, bpy + 6);
     }
 
-    // 魂の炎(判定枠に合わせたサイズで表示)
-    const soulArr = this.assets.soul;
-    if (soulArr && soulArr.length) {
-      const sImg = soulArr[Math.floor(this.animTime * 10) % soulArr.length];
-      if (sImg && sImg.complete && sImg.naturalWidth) {
-        ctx.drawImage(sImg, this.judgeLineX - 55, LANE_CY - 55, 110, 110);
+    // 魂の炎(GOGO中のみ・2.5倍・フレーム1〜6)
+    if (this.gogoActive) {
+      const soulArr = this.assets.soul;
+      if (soulArr && soulArr.length) {
+        const sImg = soulArr[1 + Math.floor(this.animTime * 10) % 6];
+        if (sImg && sImg.complete && sImg.naturalWidth) {
+          ctx.drawImage(sImg, this.judgeLineX - 137, LANE_CY - 137, 275, 275);
+        }
       }
     }
 
@@ -1541,13 +1650,13 @@ class GameEngine {
       ctx.lineJoin = 'round';
       ctx.lineWidth = 6;
       ctx.strokeStyle = '#26130b';
-      ctx.strokeText(String(this.combo), mx, my + 4);
+      ctx.strokeText(String(this.combo), 66, 266);
       ctx.fillStyle = comboColor;
-      ctx.fillText(String(this.combo), mx, my + 4);
+      ctx.fillText(String(this.combo), 66, 266);
       ctx.font = 'bold 10px sans-serif';
       ctx.lineWidth = 3;
-      ctx.strokeText('combo', mx, my + 17);
-      ctx.fillText('combo', mx, my + 17);
+      ctx.strokeText('combo', 66, 279);
+      ctx.fillText('combo', 66, 279);
     }
 
     // カウントイン表示(音楽開始前の待機中)
@@ -1626,7 +1735,7 @@ class GameEngine {
   }
 
   // ---- 縁日シーン(下部) ----
-  drawFestival(ctx, t, gogo) {
+  drawFestival(ctx, t, gogo, firePhase = null) {
     const sky = ctx.createLinearGradient(0, SCENE_Y, 0, H);
     sky.addColorStop(0, gogo ? '#4a1208' : '#33100c');
     sky.addColorStop(1, '#120404');
@@ -1636,15 +1745,15 @@ class GameEngine {
     this.drawLanternString(ctx, 356, 0, t);
     this.drawLanternString(ctx, 396, 55, t);
 
-    // GOGO中: 下側に花火を3本ループ表示
-    if (gogo) {
+    // GOGO開始時のみ: 下側に花火を3本表示(firePhaseはGOGO開始からの経過秒)
+    if (firePhase !== null) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       const spots = [[170, 480], [640, 505], [1110, 480]];
       for (let k = 0; k < 3; k++) {
         const arr = this.assets.fire;
         if (!arr || !arr.length) break;
-        const f = arr[Math.floor(this.animTime * 10 + k * 2.7) % arr.length];
+        const f = arr[Math.floor(firePhase * 10 + k * 2.7) % arr.length];
         if (f && f.complete && f.naturalWidth) {
           ctx.globalAlpha = 0.85;
           ctx.drawImage(f, spots[k][0] - 45, spots[k][1] - 90, 90, 180);
@@ -1896,7 +2005,7 @@ class GameEngine {
     const course = this.songs[this.selectedSong] ? this.songs[this.selectedSong].courses[this.selectedDiff] : null;
     if (!course) return;
     const bpm = parseFloat(course.headers.BPM) || 120;
-    const hs = (this.noteSpeed / 380).toFixed(3);
+    const hs = this.hs.toFixed(3);
     ctx.font = 'bold 17px "Courier New", monospace';
     ctx.textAlign = 'left';
     ctx.lineWidth = 4;
@@ -1986,7 +2095,15 @@ class GameEngine {
   buildSongListLayout() {
     const groups = [];
     const map = new Map();
+    const q = (this.searchQuery || '').trim().toLowerCase();
     for (let i = 0; i < this.songs.length; i++) {
+      // 検索フィルタ(曲名/TITLE/TITLEJA/ジャンル)
+      if (q) {
+        const c0 = this.songs[i].courses[0] || { headers: {} };
+        const hay = [this.songs[i].name, c0.headers.TITLE, c0.headers.TITLEJA, this.songs[i].genre, c0.headers.GENRE]
+          .filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
       const genre = this.songs[i].genre
                  || (this.songs[i].courses[0] && this.songs[i].courses[0].headers.GENRE)
                  || 'その他';
@@ -2228,8 +2345,8 @@ class GameEngine {
     for (let roll of this.rolls) {
       if (roll.hit) continue;
       if (musicTime >= roll.startTime - 0.1 && musicTime <= roll.endTime + 0.2) {
-        const sx = this.judgeLineX + (roll.startTime - musicTime) * this.noteSpeed * roll.scroll;
-        const ex = this.judgeLineX + (roll.endTime - musicTime) * this.noteSpeed * roll.scroll;
+        const sx = this.judgeLineX + (roll.startTime - musicTime) * this.noteSpeed * this.hs * roll.scroll;
+        const ex = this.judgeLineX + (roll.endTime - musicTime) * this.noteSpeed * this.hs * roll.scroll;
         if (sx <= this.judgeLineX + 30 && ex >= this.judgeLineX - 30) {
           roll.hits++;
           this.charHitT = 0.25;
@@ -2325,6 +2442,8 @@ class GameEngine {
           return;
         }
       }
+    } else if (this.screen === 'clear') {
+      this.screen = 'result';
     } else if (this.screen === 'result') {
       this.screen = 'title';
     }
@@ -2366,6 +2485,10 @@ class GameEngine {
       } else if (e.key === 'k' || e.key === 'K') {
         e.preventDefault();
         this.input(false, 'right');
+      } else if (e.key === '-' || e.key === '_') {
+        this.hs = Math.max(0.5, Math.round((this.hs - 0.5) * 10) / 10);
+      } else if (e.key === '=' || e.key === '+' || e.key === ';') {
+        this.hs = Math.min(4.0, Math.round((this.hs + 0.5) * 10) / 10);
       } else if (e.key === 'Escape') {
         this.stopGame();
         this.screen = 'songSelect';
@@ -2409,6 +2532,12 @@ document.getElementById('btnAuto').addEventListener('click', () => {
 document.getElementById('bodyColorInput').addEventListener('input', (e) => {
   game.bodyColor = e.target.value;
   game.buildComposites();
+});
+
+// 検索ボックス
+document.getElementById('searchBox').addEventListener('input', (e) => {
+  game.searchQuery = e.target.value;
+  game.scrollOffset = 0;
 });
 
 document.getElementById('folderInput').addEventListener('change', async (e) => {
@@ -2469,6 +2598,11 @@ async function traverseEntry(entry, files, path = '') {
 
 document.addEventListener('keydown', (e) => {
   if (e.repeat) return;
+  if (e.target && e.target.id === 'searchBox') return; // 検索入力中はゲームキー無効
+  if (game.screen === 'clear' && (e.key === 'Enter' || e.key === 'Escape')) {
+    game.screen = 'result';
+    return;
+  }
   game.handleKey(e);
 });
 canvas.addEventListener('mousedown', (e) => {
